@@ -52,7 +52,6 @@ public:
     {
         if (shards.empty())
         {
-            int vnodes_per_shard = DEFAULT_VNODES;
             throw invalid_argument("shard list is empty");
         }
         if (vnodes_per_shard <= 0)
@@ -82,6 +81,8 @@ public:
                             return a.position == b.position;
                         }),
             ring_.end());
+        shard_count_ = static_cast<int>(shards.size());
+        vnodes_per_shard_ = vnodes_per_shard;
     }
 
     int lookup(const string &key) const
@@ -96,7 +97,7 @@ public:
                               { return v.position < val; });
         if (it == ring_.end())
         {
-            it = ring_.end();
+            it = ring_.begin();
         }
         return it->shard_id;
     }
