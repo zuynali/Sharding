@@ -1,3 +1,5 @@
+#pragma once
+
 #include <arpa/inet.h>    // htonl, htons, ntohl, ntohs
 #include <cstdint>
 #include <cstring>        // memcpy
@@ -61,16 +63,6 @@ inline bool write_exact(int fd, const void *buf, size_t n) {
     return true;
 }
 
-inline void encode_header(uint8_t out[HEADER_SIZE], const MsgHeader &h) {
-    uint32_t ml = htonl(h.msg_len);
-    uint16_t mt = htons(h.msg_type);
-    uint16_t fl = htons(h.flags);
-    uint32_t ti = htonl(h.tx_id);
-    std::memcpy(out + 0, &ml, 4);
-    std::memcpy(out + 4, &mt, 2);
-    std::memcpy(out + 6, &fl, 2);
-    std::memcpy(out + 8, &ti, 4);
-}
 
 inline void encode_header(uint8_t out[HEADER_SIZE], const MsgHeader &h) {
     uint32_t ml = htonl(h.msg_len);
