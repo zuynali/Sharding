@@ -9,7 +9,6 @@
 #include <vector>
 
 enum MsgType : uint16_t {
-    // Phase 1.... single-key operations
     PUT_ONE       = 1,
     PUT_ONE_RESP  = 2,
     GET_ONE       = 3,
