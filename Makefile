@@ -26,7 +26,7 @@ BIN := bin
 # Sources for each binary
 # --------------------------------------------------------------------------
 
-SHARD_SRC := $(SRC)/shard.cpp
+SHARD_SRC := $(SRC)/shard.cpp $(SRC)/wal.cpp
 COORD_SRC := $(SRC)/coord.cpp
 CLI_SRC   := $(SRC)/cli.cpp
 TEST_SRC  := $(TST)/ring_test.cpp
@@ -71,17 +71,17 @@ dirs:
 # --------------------------------------------------------------------------
 
 $(SHARD_BIN): $(SHARD_SRC) $(HEADERS) | dirs
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $@ $(SHARD_SRC) $(LDFLAGS)
 
 $(COORD_BIN): $(COORD_SRC) $(HEADERS) | dirs
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $@ $(COORD_SRC) $(LDFLAGS)
 
 $(CLI_BIN): $(CLI_SRC) $(HEADERS) | dirs
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
+	$(CXX) $(CXXFLAGS) -o $@ $(CLI_SRC) $(LDFLAGS)
 
 $(TEST_BIN): $(TEST_SRC) $(SRC)/ring.hpp | dirs
-	$(CXX) $(CXXFLAGS) -o $@ $< $(LDFLAGS)
-
+	$(CXX) $(CXXFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
+	
 # --------------------------------------------------------------------------
 # Test target — build test binary and run it
 # --------------------------------------------------------------------------
