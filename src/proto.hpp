@@ -222,5 +222,6 @@ inline bool roundtrip(int fd,
         throw std::runtime_error("roundtrip: send failed");
     if (!recv_msg(fd, resp_hdr_out, resp_body_out))
         throw std::runtime_error("roundtrip: connection closed before response");
+    
     return true;
 }

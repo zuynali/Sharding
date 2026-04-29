@@ -26,7 +26,9 @@ BIN := bin
 # Sources for each binary
 # --------------------------------------------------------------------------
 
+# shard needs wal.cpp because WAL methods are defined there, not in the header
 SHARD_SRC := $(SRC)/shard.cpp $(SRC)/wal.cpp
+
 COORD_SRC := $(SRC)/coord.cpp
 CLI_SRC   := $(SRC)/cli.cpp
 TEST_SRC  := $(TST)/ring_test.cpp
@@ -70,6 +72,7 @@ dirs:
 # Binary rules
 # --------------------------------------------------------------------------
 
+# shard links shard.cpp + wal.cpp together (WAL methods live in wal.cpp)
 $(SHARD_BIN): $(SHARD_SRC) $(HEADERS) | dirs
 	$(CXX) $(CXXFLAGS) -o $@ $(SHARD_SRC) $(LDFLAGS)
 
@@ -81,7 +84,7 @@ $(CLI_BIN): $(CLI_SRC) $(HEADERS) | dirs
 
 $(TEST_BIN): $(TEST_SRC) $(SRC)/ring.hpp | dirs
 	$(CXX) $(CXXFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
-	
+
 # --------------------------------------------------------------------------
 # Test target — build test binary and run it
 # --------------------------------------------------------------------------
