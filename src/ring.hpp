@@ -65,7 +65,7 @@ public:
         {
             for (int i = 0; i < vnodes_per_shard; i++)
             {
-                string vnode_key = shard.name + "-" + to_string(i);
+                string vnode_key = to_string(i) + "-" + shard.name;
                 uint32_t pos = fnv1a(vnode_key);
                 ring_.push_back({pos, shard.id});
             }
