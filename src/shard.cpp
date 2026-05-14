@@ -12,9 +12,10 @@
 #include <sys/socket.h>
 #include <unordered_map>
 #include <unistd.h>
+#include <vector>
 
 // =============================================================================
-// shard.cpp  —  Shard server process
+// shard.cpp  —  Shard server process (Phase 1 + Phase 2)
 // =============================================================================
 //
 // Usage:
@@ -26,12 +27,13 @@
 // The shard is a single-threaded TCP server that:
 //   1. Replays its WAL on startup to rebuild the in-memory KV store.
 //   2. Accepts exactly ONE connection from the coordinator (not from clients).
-//   3. Handles binary-framed messages: PUT_ONE, GET_ONE, DEL_ONE.
-//   4. For every write: WAL first, fsync, then update memory, then respond.
+//   3. Handles binary-framed messages: PUT_ONE, GET_ONE, DEL_ONE (Phase 1).
+//   4. Handles STAGE, PREPARE, COMMIT_TXN, ABORT_TXN (Phase 2 — 2PC).
+//   5. For every write: WAL first, fsync, then update memory, then respond.
 //
-// Single-threaded is deliberate for Phase 1 — one coordinator connection,
-// no concurrency needed.  Phase 2 will keep this model (transactions are
-// serialised per-shard by the coordinator's sequential 2PC messages).
+// Single-threaded is deliberate — one coordinator connection, no concurrency
+// needed.  Transactions are serialised per-shard by the coordinator's
+// sequential 2PC messages.
 // =============================================================================
 
 // =============================================================================
@@ -42,8 +44,13 @@ static std::unordered_map<std::string, std::string> g_store;
 static WAL g_wal;
 static int g_shard_id = 0;
 
+// ── Phase 2: Staging area ────────────────────────────────────────────────────
+// Maps tx_id → list of operations waiting for COMMIT.
+// Populated by STAGE messages, resolved by COMMIT_TXN or ABORT_TXN.
+static std::unordered_map<uint32_t, std::vector<StagedOp>> g_staged;
+
 // =============================================================================
-// Message handlers
+// Phase 1: Message handlers (single-key operations, no transaction)
 // =============================================================================
 
 static void handle_put_one(int fd, const MsgHeader &hdr,
@@ -103,6 +110,144 @@ static void handle_del_one(int fd, const MsgHeader &hdr,
 }
 
 // =============================================================================
+// Phase 2: Transaction message handlers (2PC)
+// =============================================================================
+
+// ── STAGE ────────────────────────────────────────────────────────────────────
+// The coordinator sends STAGE to save an operation without applying it yet.
+// Body layout: [1 byte op_type][key as length-prefixed string]
+//              [if PUT: val as length-prefixed string]
+
+static void handle_stage(int fd, const MsgHeader &hdr,
+                          const std::vector<uint8_t> &body)
+{
+    if (body.empty()) {
+        send_msg(fd, STAGE_RESP, hdr.tx_id, build_resp_err("empty STAGE body"));
+        return;
+    }
+
+    uint8_t op_type = body[0];
+    size_t offset = 1;
+
+    std::string key, val;
+    try {
+        key = decode_str(body, offset);
+        if (op_type == 1) { // PUT
+            val = decode_str(body, offset);
+        }
+    } catch (const std::exception &e) {
+        send_msg(fd, STAGE_RESP, hdr.tx_id, build_resp_err(e.what()));
+        return;
+    }
+
+    // Save into staging area — do NOT touch g_store yet
+    g_staged[hdr.tx_id].push_back({op_type, key, val});
+
+    printf("[shard %d] staged %s %s for tx %u\n",
+           g_shard_id,
+           op_type == 1 ? "PUT" : "DEL",
+           key.c_str(),
+           hdr.tx_id);
+
+    send_msg(fd, STAGE_RESP, hdr.tx_id, build_resp_ok());
+}
+
+// ── PREPARE ──────────────────────────────────────────────────────────────────
+// PREPARE means: "are you ready to commit tx_id? Write your promise to WAL."
+// After WAL::append_txn_prepare fsyncs, we MUST honour the decision —
+// even if we crash and restart.
+
+static void handle_prepare(int fd, const MsgHeader &hdr,
+                            const std::vector<uint8_t> &/*body*/)
+{
+    uint32_t tx_id = hdr.tx_id;
+    auto it = g_staged.find(tx_id);
+
+    if (it == g_staged.end()) {
+        // We have no staged ops for this tx — protocol error
+        printf("[shard %d] PREPARE for unknown tx %u — voting NO\n",
+               g_shard_id, tx_id);
+        std::vector<uint8_t> resp = { 0 };  // 0 = NO
+        send_msg(fd, PREPARE_RESP, tx_id, resp);
+        return;
+    }
+
+    const char* force_abort = getenv("SHARD_FORCE_NO_PREPARE");
+    if (force_abort && strcmp(force_abort, "1") == 0) {
+        printf("[shard %d] SHARD_FORCE_NO_PREPARE is set — deliberately voting NO for tx %u\n",
+               g_shard_id, tx_id);
+        std::vector<uint8_t> resp = { 0 };  // 0 = NO
+        send_msg(fd, PREPARE_RESP, tx_id, resp);
+        return;
+    }
+
+    // Write a PREPARE record to WAL — this is the "promise"
+    g_wal.append_txn_prepare(tx_id, it->second);
+
+    printf("[shard %d] PREPARED tx %u (%zu ops) — voting YES\n",
+           g_shard_id, tx_id, it->second.size());
+
+    // Vote YES
+    std::vector<uint8_t> resp = { 1 };  // 1 = YES
+    send_msg(fd, PREPARE_RESP, tx_id, resp);
+}
+
+// ── COMMIT_TXN ───────────────────────────────────────────────────────────────
+// COMMIT means: "apply those staged ops for real now."
+
+static void handle_commit_txn(int fd, const MsgHeader &hdr,
+                               const std::vector<uint8_t> &/*body*/)
+{
+    uint32_t tx_id = hdr.tx_id;
+    auto it = g_staged.find(tx_id);
+
+    if (it != g_staged.end()) {
+        // Apply every staged operation to the main store
+        for (const auto &op : it->second) {
+            if (op.op_type == 1) {      // PUT
+                g_store[op.key] = op.val;
+            } else if (op.op_type == 2) { // DEL
+                g_store.erase(op.key);
+            }
+        }
+        // Write COMMIT to WAL, then clean up staging
+        g_wal.append_txn_commit(tx_id);
+        g_staged.erase(it);
+
+        printf("[shard %d] COMMITTED tx %u\n", g_shard_id, tx_id);
+    } else {
+        // tx_id not found: already committed (duplicate message), just ACK
+        printf("[shard %d] COMMIT for already-resolved tx %u — re-ACK\n",
+               g_shard_id, tx_id);
+    }
+
+    std::vector<uint8_t> resp = { 1 };  // ACK
+    send_msg(fd, COMMIT_RESP, tx_id, resp);
+}
+
+// ── ABORT_TXN ────────────────────────────────────────────────────────────────
+// ABORT means: "throw away the staged ops, nothing happened."
+
+static void handle_abort_txn(int fd, const MsgHeader &hdr,
+                              const std::vector<uint8_t> &/*body*/)
+{
+    uint32_t tx_id = hdr.tx_id;
+    auto it = g_staged.find(tx_id);
+
+    if (it != g_staged.end()) {
+        g_wal.append_txn_abort(tx_id);
+        g_staged.erase(it);
+        printf("[shard %d] ABORTED tx %u\n", g_shard_id, tx_id);
+    } else {
+        printf("[shard %d] ABORT for already-resolved tx %u — re-ACK\n",
+               g_shard_id, tx_id);
+    }
+
+    std::vector<uint8_t> resp = { 1 };  // ACK
+    send_msg(fd, ABORT_RESP, tx_id, resp);
+}
+
+// =============================================================================
 // Connection loop — process messages from one coordinator connection
 // =============================================================================
 
@@ -114,9 +259,16 @@ static void run_connection(int conn_fd) {
 
     while (recv_msg(conn_fd, hdr, body)) {
         switch (static_cast<MsgType>(hdr.msg_type)) {
+            // Phase 1: single-key ops
             case PUT_ONE: handle_put_one(conn_fd, hdr, body); break;
             case GET_ONE: handle_get_one(conn_fd, hdr, body); break;
             case DEL_ONE: handle_del_one(conn_fd, hdr, body); break;
+
+            // Phase 2: 2PC transaction ops
+            case STAGE:       handle_stage(conn_fd, hdr, body);       break;
+            case PREPARE:     handle_prepare(conn_fd, hdr, body);     break;
+            case COMMIT_TXN:  handle_commit_txn(conn_fd, hdr, body);  break;
+            case ABORT_TXN:   handle_abort_txn(conn_fd, hdr, body);   break;
 
             default:
                 fprintf(stderr, "[shard %d] unknown msg_type=%u, ignoring\n",
@@ -179,14 +331,19 @@ int main(int argc, char *argv[]) {
 
     int replayed = 0;
     try {
-        replayed = WAL::replay(wal_path, g_store);
+        // Phase 2 replay: also rebuilds g_staged for "in-doubt" transactions
+        replayed = WAL::replay(wal_path, g_store, g_staged);
     } catch (const std::exception &e) {
         fprintf(stderr, "[shard %d] WAL replay failed: %s\n",
                 g_shard_id, e.what());
         return 1;
     }
-    printf("[shard %d] WAL replay: %d records, %zu keys in store\n",
+    printf("[shard %d] WAL replay: %d records, %zu keys in store",
            g_shard_id, replayed, g_store.size());
+    if (!g_staged.empty()) {
+        printf(", %zu in-doubt txns restored", g_staged.size());
+    }
+    printf("\n");
 
     // ── 2. Open WAL for appending ──────────────────────────────────────────
     try {
@@ -218,7 +375,7 @@ int main(int argc, char *argv[]) {
     printf("[shard %d] ready on port %d\n", g_shard_id, args.port);
 
     // ── 4. Accept loop ─────────────────────────────────────────────────────
-    // In Phase 1 we accept one connection at a time (coordinator only).
+    // Accept one connection at a time (coordinator only).
     // If the coordinator disconnects and reconnects, we accept again.
     while (true) {
         sockaddr_in peer{};
