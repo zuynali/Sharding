@@ -139,6 +139,7 @@ public:
     // Also outputs the maximum tx_id seen to max_tx_id_out.
     static int replay_coord(const std::string &path,
                             std::unordered_map<uint32_t, CoordDecision> &pending_out,
+                            std::set<uint32_t> &pending_begins_out,
                             uint32_t &max_tx_id_out);
 
     // Replay the WAL from disk into store_out.

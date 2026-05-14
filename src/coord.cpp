@@ -590,9 +590,10 @@ int main(int argc, char *argv[]) {
     std::string wal_path = data_dir + "/coord.wal";
 
     std::unordered_map<uint32_t, WAL::CoordDecision> pending_decisions;
+    std::set<uint32_t> pending_begins;
     uint32_t max_tx_id = 0;
     try {
-        WAL::replay_coord(wal_path, pending_decisions, max_tx_id);
+        WAL::replay_coord(wal_path, pending_decisions, pending_begins, max_tx_id);
         if (max_tx_id >= g_next_tx_id) g_next_tx_id = max_tx_id + 1;
     } catch (const std::exception &e) {
         fprintf(stderr, "[coord] WAL replay failed: %s\n", e.what());
@@ -624,6 +625,25 @@ int main(int argc, char *argv[]) {
             recv_msg(sc->fd, r, rb);
         }
         if (g_coord_wal.is_open()) g_coord_wal.append_coord_done(tx_id);
+    }
+
+    // Abort incomplete transactions (TX_BEGIN with no decision)
+    for (uint32_t tx_id : pending_begins) {
+        printf("[coord] aborting incomplete tx %u on startup\n", tx_id);
+        std::vector<uint8_t> empty_body;
+        for (auto &sc : g_shards) {
+            if (sc.fd >= 0) send_msg(sc.fd, ABORT_TXN, tx_id, empty_body);
+        }
+        for (auto &sc : g_shards) {
+            if (sc.fd >= 0) {
+                MsgHeader r{}; std::vector<uint8_t> rb;
+                recv_msg(sc.fd, r, rb);
+            }
+        }
+        if (g_coord_wal.is_open()) {
+            g_coord_wal.append_coord_abort_decision(tx_id, {});
+            g_coord_wal.append_coord_done(tx_id);
+        }
     }
 
     // Create TCP listener for clients

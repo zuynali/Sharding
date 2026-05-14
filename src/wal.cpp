@@ -277,6 +277,7 @@ void WAL::append_coord_done(uint32_t tx_id) {
 
 int WAL::replay_coord(const std::string &path,
                       std::unordered_map<uint32_t, CoordDecision> &pending_out,
+                      std::set<uint32_t> &pending_begins_out,
                       uint32_t &max_tx_id_out)
 {
     max_tx_id_out = 0;
@@ -335,9 +336,10 @@ int WAL::replay_coord(const std::string &path,
 
         switch (type) {
             case WalRecType::TX_BEGIN:
-                // No action needed for pending_out
+                pending_begins_out.insert(tx_id);
                 break;
             case WalRecType::TX_COMMIT_DECISION: {
+                pending_begins_out.erase(tx_id);
                 uint32_t count = get_u32(payload_ptr, payload_len, off);
                 CoordDecision dec;
                 dec.commit = true;
@@ -348,6 +350,7 @@ int WAL::replay_coord(const std::string &path,
                 break;
             }
             case WalRecType::TX_ABORT_DECISION: {
+                pending_begins_out.erase(tx_id);
                 uint32_t count = get_u32(payload_ptr, payload_len, off);
                 CoordDecision dec;
                 dec.commit = false;
@@ -358,6 +361,7 @@ int WAL::replay_coord(const std::string &path,
                 break;
             }
             case WalRecType::TX_DONE: {
+                pending_begins_out.erase(tx_id);
                 pending_out.erase(tx_id);
                 break;
             }
