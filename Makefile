@@ -29,7 +29,7 @@ BIN := bin
 # shard needs wal.cpp because WAL methods are defined there, not in the header
 SHARD_SRC := $(SRC)/shard.cpp $(SRC)/wal.cpp
 
-COORD_SRC := $(SRC)/coord.cpp
+COORD_SRC := $(SRC)/coord.cpp $(SRC)/wal.cpp
 CLI_SRC   := $(SRC)/cli.cpp
 TEST_SRC  := $(TST)/ring_test.cpp
 
